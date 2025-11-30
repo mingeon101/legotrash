@@ -1,8 +1,13 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from picamera2 import Picamera2 # ⬅️ Raspberry Pi 카메라를 위한 라이브러리 추가
 import time
+import os # 파일 존재 여부 및 변경 확인을 위해 os 모듈 추가
+
+# --- [사용자 설정] ---
+# 처리할 이미지 파일의 경로를 여기에 지정하세요.
+IMAGE_PATH = "path/to/your/image.jpg" 
+# --------------------
 
 # 1. 모델 로드 및 감지할 클래스 인덱스 설정
 model = YOLO("yolov8n.pt")
@@ -11,12 +16,12 @@ detection_classes = [0, 9]
 
 def determine_light_color(crop_img):
     """
-    잘라낸 신호등 영역의 픽셀별 RGB 값을 분석하여 색깔을 결정합니다.
+    잘라낸 신호등 영역의 픽셀별 BGR 값을 분석하여 색깔을 결정합니다.
     """
     if crop_img is None or crop_img.size == 0:
         return "Not Found"
 
-    # BGR 평균값 계산
+    # BGR 평균값 계산 (OpenCV의 BGR 순서를 가정)
     mean_bgr = cv2.mean(crop_img)
     B = mean_bgr[0]
     G = mean_bgr[1]
@@ -25,15 +30,13 @@ def determine_light_color(crop_img):
     # 픽셀의 전체 밝기 (intensity)
     intensity = R + G + B
     
-    # 디버깅을 위해 RGB 값과 intensity를 문자열로 반환
     debug_rgb = f"R={R:.1f}, G={G:.1f}, B={B:.1f}, Int={intensity:.1f}"
 
     # 1. 'Dim/Off' 필터
-    if intensity < 40: 
+    if intensity < 40:  
         return f"⚫ Dim/Off ({debug_rgb})"
 
     # 2. 🔴 빨간불 인식 로직
-    # R * 2 > B + G - 10
     if (R * 2 > B + G - 10): 
         return f"🔴 Red/Stop ({debug_rgb})"
 
@@ -43,36 +46,27 @@ def determine_light_color(crop_img):
 
     # 4. 기타: Unknown으로 처리
     else:
-        # 여기에 초록불 인식 로직 (G > R and G > B)를 추가하면 더 정확해집니다.
         return f"⚫ Unknown ({debug_rgb})"
 
 
-# 2. Picamera2 객체 초기화 및 설정 (웹캠 캡처 객체 대체)
-try:
-    picam2 = Picamera2()
-    # 고해상도 설정을 위한 configuration
-    # YOLO 추론 속도를 위해 낮은 해상도(예: 640x480)를 사용하는 것이 좋습니다.
-    picam2.preview_configuration.main.size = (640, 480) 
-    picam2.preview_configuration.main.format = "RGB888" # BGR 대신 RGB888 포맷 사용
-    picam2.preview_configuration.align()
-    picam2.configure("preview")
-    picam2.start()
-    print("Raspberry Pi 카메라를 시작합니다. 'q' 키를 누르면 종료됩니다.")
-    
-except Exception as e:
-    print(f"오류: Picamera2 초기화 실패. 카메라가 연결되어 있고 라이브러리가 설치되었는지 확인하세요. 오류: {e}")
-    exit()
+print(f"이미지 파일 반복 감지 모드 시작. 대상 경로: {IMAGE_PATH}")
+print("'q' 키를 누르면 종료됩니다.")
 
-# 3. 실시간 프레임 처리 루프
+# 2. 이미지 파일 반복 처리 루프
 while True:
-    # ⬅️ Picamera2로부터 프레임 캡처 (NumPy 배열)
-    frame = picam2.capture_array()
-    
-    # Picamera2는 기본적으로 RGB 포맷을 반환하므로,
-    # OpenCV의 BGR 포맷에 맞추기 위해 변환합니다.
-    # determine_light_color 함수는 BGR 순서를 가정하고 있습니다.
-    #frame = cv2.cvtColor(frame, cv2.COLOR_RGB2)
+    # ⬅️ [핵심 변경] while 루프 내에서 파일을 반복해서 로드
+    frame = cv2.imread(IMAGE_PATH) 
 
+    if frame is None:
+        if not os.path.exists(IMAGE_PATH):
+             print(f"경고: 파일({IMAGE_PATH})을 찾을 수 없습니다. 1초 후 재시도합니다.")
+        else:
+             print(f"경고: 파일을 읽는 데 실패했습니다. 파일이 손상되었거나 접근 권한이 없습니다. 1초 후 재시도합니다.")
+        # 파일이 없거나 읽을 수 없으면 1초 대기 후 다시 루프 시작
+        if cv2.waitKey(1000) & 0xFF == ord('q'):
+             break
+        continue
+    
     # YOLOv8 추론 실행
     results = model.predict(
         source=frame, 
@@ -124,13 +118,16 @@ while True:
             cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     # 6. 처리된 프레임을 화면에 표시
-    cv2.imshow('YOLOv8 Traffic Light & Person Detection (Picamera2)', frame)
+    cv2.imshow('YOLOv8 Traffic Light & Person Detection (File Watcher Mode)', frame)
 
-    # 'q' 키를 누르면 루프 종료
+    # ⬅️ 100ms(0.1초) 대기하며 'q' 키 입력 확인. 필요 시 time.sleep()으로 대기 시간을 추가할 수 있음.
+    # cv2.waitKey(1)의 대기 시간이 곧 파일 재확인 주기입니다.
+    # 여기서는 1ms로 두어 빠른 반응을 유지하고, 필요하면 time.sleep(0.5) 등으로 주기 조절
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
-    time.sleep(0.05)
+    
+    # 파일 변경 속도를 늦추고 싶다면 여기서 time.sleep()을 사용하세요. (예: 0.5초 대기)
+    time.sleep(0.5) 
 
 # 7. 자원 해제
-picam2.stop() # ⬅️ picamera2 객체 중지
 cv2.destroyAllWindows()
